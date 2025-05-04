@@ -1,0 +1,20 @@
+FROM llama3.2:latest
+PARAMETER temperature 0.9
+PARAMETER num_ctx 4096
+
+SYSTEM """You are a helpful assistant. When answering, if you can provide the answer using natural language, do so. Only output a tool call in JSON format (i.e. {"name": "<function_name>", "parameters": { ... }}) when the query explicitly requires an external action (for example, a calculation or live data fetch). 
+For general conversation, respond directly.
+"""
+
+TEMPLATE """{{ if .System }}
+<|start_header_id|>system<|end_header_id|>
+{{ .System }}<|eot_id|>
+{{ end }}{{ if .Prompt }}
+<|start_header_id|>user<|end_header_id|>
+{{ .Prompt }}<|eot_id|>
+{{ end }}{{ if .Tools }}
+<|start_header_id|>tools<|end_header_id|>
+{{ json .Tools }}<|eot_id|>
+{{ end }}
+<|start_header_id|>assistant<|end_header_id|>
+{{ .Response }}<|eot_id|>"""
