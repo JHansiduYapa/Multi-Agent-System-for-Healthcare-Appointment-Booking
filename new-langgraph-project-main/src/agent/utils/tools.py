@@ -7,32 +7,232 @@ from langgraph.prebuilt import InjectedState
 from langgraph.graph import StateGraph, MessagesState, START, END
 from pydantic import BaseModel, Field
 from typing import Literal
+from langchain_core.tools import tool
+from typing import Optional, Dict, List
+import sqlite3
+import json
+import os
 
-# Doctor appointment tools
-def book_appointment(doctor_name: str, date: str, time: str):
-    """Book a new doctor appointment"""
-    return f"Appointment booked with Dr. {doctor_name} on {date} at {time}."
+# Define your database path
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'database', 'appointments.db')
 
-def reschedule_appointment(appointment_id: str, new_date: str, new_time: str):
-    """Reschedule an existing doctor appointment"""
-    return f"Appointment {appointment_id} rescheduled to {new_date} at {new_time}."
 
-def cancel_appointment(appointment_id: str):
-    """Cancel an existing doctor appointment"""
-    return f"Appointment {appointment_id} has been cancelled."
+# Tool 1: Search for doctor
+@tool
+def search_for_doctor(name: Optional[str] = None) -> str:
+    """
+    Search for doctors by name (or return all if name is None).
 
-def search_doctor(specialization: str = "", location: str = ""):
-    """Search for doctors by specialization and/or location"""
-    return f"Found doctors matching specialization='{specialization}' and location='{location}'."
+    Args:
+        name (Optional[str]): The partial or full name of the doctor.
 
-def search_appointment(patient_id: str = "", doctor_name: str = "", date: str = ""):
-    """Search for existing appointments by patient, doctor, or date"""
-    return f"Found appointments for patient_id='{patient_id}', doctor='{doctor_name}', date='{date}'."
+    Returns:
+        str: JSON-encoded list of matching doctors.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    if name:
+        cursor.execute("SELECT * FROM Doctor WHERE Doctor_Name LIKE ?", (f"%{name}%",))
+    else:
+        cursor.execute("SELECT * FROM Doctor")
+
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return json.dumps(results)
+
+
+# Tool 2: Check doctor's availability
+@tool
+def check_doctor_availability(doctor_id: int, date: str, time: str) -> str:
+    """
+    Check if a doctor is available at a given date and time.
+
+    Args:
+        doctor_id (int): The ID of the doctor.
+        date (str): Date of the appointment in 'YYYY-MM-DD'.
+        time (str): Time of the appointment in 'HH:MM'.
+
+    Returns:
+        str: JSON with availability message.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT 1 FROM Appointment
+        WHERE Doctor_ID = ? AND Appointment_Date = ? AND Appointment_Time = ?
+    """, (doctor_id, date, time))
+
+    result = cursor.fetchone()
+    conn.close()
+
+    available = result is None
+    return json.dumps({"available": available, "message": "Doctor is available" if available else "Doctor is not available"})
+
+
+# Tool 3: Book appointment
+@tool
+def book_appointment(user_id: int, doctor_id: int, date: str, time: str) -> str:
+    """
+    Book an appointment with a doctor if available.
+
+    Args:
+        user_id (int): The ID of the patient.
+        doctor_id (int): The ID of the doctor.
+        date (str): Appointment date in 'YYYY-MM-DD'.
+        time (str): Appointment time in 'HH:MM'.
+
+    Returns:
+        str: JSON with booking status.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Check availability
+    cursor.execute("""
+        SELECT 1 FROM Appointment
+        WHERE Doctor_ID = ? AND Appointment_Date = ? AND Appointment_Time = ?
+    """, (doctor_id, date, time))
+    result = cursor.fetchone()
+
+    if result:
+        conn.close()
+        return json.dumps({"success": False, "message": "Doctor is not available at this date and time."})
+
+    # Insert new appointment
+    cursor.execute("""
+        INSERT INTO Appointment (Appointment_Time, Appointment_Date, Doctor_ID, Patient_ID)
+        VALUES (?, ?, ?, ?)
+    """, (time, date, doctor_id, user_id))
+
+    conn.commit()
+    conn.close()
+
+    return json.dumps({"success": True, "message": "Appointment booked successfully."})
+
+# Tool 4: Search for an appointment by ID
+@tool
+def search_for_appointment(appointment_id: int) -> str:
+    """
+    Search for an appointment by its ID.
+
+    Args:
+        appointment_id (int): The ID of the appointment.
+
+    Returns:
+        str: JSON string with appointment details or failure message.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT Appointment_ID, Appointment_Date, Appointment_Time, Doctor_ID, Patient_ID
+        FROM Appointment
+        WHERE Appointment_ID = ?
+    """, (appointment_id,))
+    
+    result = cursor.fetchone()
+    conn.close()
+
+    if result:
+        return json.dumps({
+            "success": True,
+            "appointment": {
+                "appointment_id": result[0],
+                "date": result[1],
+                "time": result[2],
+                "doctor_id": result[3],
+                "patient_id": result[4]
+            }
+        })
+    else:
+        return json.dumps({"success": False, "message": "Appointment not found."})
+
+
+# Tool 5: Cancel an appointment by ID
+@tool
+def cancel_appointment(appointment_id: int) -> str:
+    """
+    Cancel an existing appointment by its ID.
+
+    Args:
+        appointment_id (int): The ID of the appointment to cancel.
+
+    Returns:
+        str: JSON string with success/failure status and message.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Check if appointment exists
+    cursor.execute("SELECT 1 FROM Appointment WHERE Appointment_ID = ?", (appointment_id,))
+    result = cursor.fetchone()
+
+    if not result:
+        conn.close()
+        return json.dumps({"success": False, "message": "Appointment not found."})
+
+    # Cancel appointment
+    cursor.execute("DELETE FROM Appointment WHERE Appointment_ID = ?", (appointment_id,))
+    conn.commit()
+    conn.close()
+
+    return json.dumps({"success": True, "message": "Appointment cancelled successfully."})
+
+# Tool 5: Cancel an appointment by ID
+@tool
+def reschedule_appointment(appointment_id: int, date: str, time: str) -> str:
+    """
+    Reschedule an existing appointment to a new date and time if the doctor is available.
+
+    Args:
+        appointment_id (int): ID of the appointment to update.
+        date (str): New date in 'YYYY-MM-DD' format.
+        time (str): New time in 'HH:MM' format.
+
+    Returns:
+        str: JSON string with success/failure status and message.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Get doctor ID for the existing appointment
+    cursor.execute("SELECT Doctor_ID FROM Appointment WHERE Appointment_ID = ?", (appointment_id,))
+    result = cursor.fetchone()
+    if not result:
+        conn.close()
+        return json.dumps({"success": False, "message": "Appointment not found."})
+
+    doctor_id = result[0]
+
+    # Check if doctor is already booked at the new time (excluding current appointment)
+    cursor.execute("""
+        SELECT 1 FROM Appointment
+        WHERE Doctor_ID = ? AND Appointment_Date = ? AND Appointment_Time = ? AND Appointment_ID != ?
+    """, (doctor_id, date, time, appointment_id))
+
+    if cursor.fetchone():
+        conn.close()
+        return json.dumps({"success": False, "message": "Doctor is not available at the requested time."})
+
+    # Update appointment
+    cursor.execute("""
+        UPDATE Appointment
+        SET Appointment_Date = ?, Appointment_Time = ?
+        WHERE Appointment_ID = ?
+    """, (date, time, appointment_id))
+
+    conn.commit()
+    conn.close()
+
+    return json.dumps({"success": True, "message": "Appointment Rescheduled successfully."})
+
+
 
 class new_booking_assistant(BaseModel):
-    """If user needs to book a new appointment with a doctor"""
-    reason: str = Field(description="Reason why the request should be routed")
+    """based on conversation history,If user needs to book a new appointment with a doctor"""
 
 class cancel_booking_assistant(BaseModel):
-    """If user needs to cancel an appointment"""
-    reason: str = Field(description="Reason why the request should be routed")
+    """based on conversation history,If user needs to cancel an appointment"""
