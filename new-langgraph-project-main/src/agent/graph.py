@@ -58,7 +58,7 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
     "role": "system",
     "content": "You are a routing assistant. "
                 "Based on the message history, decide whether the conversation should be handed over to a specialized agent. "
-                "Use the appropriate tool to route the request when needed."
+                "Use the appropriate tool to route the request."
                 "you can not use other tools on booking and cancelling."
     }
     messages_with_prompt = [custom_prompt] + state["messages"]
@@ -87,7 +87,7 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
                 # next node to be executed next
                 goto=tool_name,
                 # state update 
-                update={"messages": [],}
+                update={"messages": "{tool_name} calling",}
             )
     
     # if the tool is not called and the llm provide the output
