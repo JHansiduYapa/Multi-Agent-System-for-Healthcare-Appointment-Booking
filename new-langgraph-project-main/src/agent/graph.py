@@ -1,8 +1,6 @@
 """LangGraph single-node graph template.
-
 Returns a predefined response. Replace logic and configuration as needed.
 """
-
 from __future__ import annotations
 from langgraph.graph import StateGraph, END
 from dataclasses import dataclass
@@ -16,7 +14,7 @@ from langgraph.prebuilt.chat_agent_executor import AgentState
 from typing import Annotated, Literal, Optional
 from typing_extensions import TypedDict
 from langgraph.graph.message import AnyMessage, add_messages
-from agent.utils.llm import _get_llm
+from agent.utils.llm import _get_llm,dummy_token_counter
 from agent.utils.tools import book_appointment,cancel_appointment,search_for_appointment,check_doctor_availability,search_for_doctor,new_booking_assistant,cancel_booking_assistant
 from langgraph.prebuilt import tools_condition
 from langgraph.prebuilt import ToolNode
@@ -24,7 +22,14 @@ from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 from langchain_core.messages import ToolMessage
-#from agent.utils.prompts import _get_cancel_appointment_prompt, _get_router_prompt, _get_book_doctor_prompt
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    trim_messages,
+)
+from langchain_core.messages.utils import count_tokens_approximately
 
 # state of the graph
 class State(AgentState):
@@ -33,27 +38,51 @@ class State(AgentState):
 
 # call the model in input
 def new_booking_assistant_node(state: State, config: RunnableConfig) -> Dict[Any]:
-    """Process input and returns output.
-
-    Can use runtime configuration to alter behavior.
+    """Process input and returns output.can use runtime configuration to alter behavior.
     """
     llm_new_booking = _get_llm()
+    llm_new_booking = llm_new_booking.bind_tools([])
     llm_new_booking_with_tools = llm_new_booking.bind_tools([book_appointment,search_for_doctor,check_doctor_availability])
-
-    # make a runnable with prompt template
-    # new_booking_runnable = book_doctor_prompt | llm_new_booking_with_tools
     response = llm_new_booking_with_tools.invoke(state["messages"])
-
     return {"messages": response}
 
 def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "new_booking_assistant",END]]:
     """Route to correct worker agent, You only routing the conversation.
     """
     llm_router = _get_llm()
+    llm_router = llm_router.bind_tools([])
     llm_router_with_tools = llm_router.bind_tools([cancel_booking_assistant,new_booking_assistant])
 
-    # make a runnable with prompt template
-    # router_runnable = router_prompt | llm_router_with_tools
+    # trim the messages 
+    # trim_messages(
+    #     state['messages'],
+    #     # Keep the last <= n_count tokens of the messages.
+    #     strategy="last",
+    #     # Remember to adjust based on your model
+    #     # or else pass a custom token_counter
+    #     token_counter=count_tokens_approximately,
+    #     # Most chat models expect that chat history starts with either:
+    #     # (1) a HumanMessage or
+    #     # (2) a SystemMessage followed by a HumanMessage
+    #     # Remember to adjust based on the desired conversation
+    #     # length
+    #     max_tokens=45,
+    #     # Most chat models expect that chat history starts with either:
+    #     # (1) a HumanMessage or
+    #     # (2) a SystemMessage followed by a HumanMessage
+    #     start_on="human",
+    #     # Most chat models expect that chat history ends with either:
+    #     # (1) a HumanMessage or
+    #     # (2) a ToolMessage
+    #     end_on=("human", "tool"),
+    #     # Usually, we want to keep the SystemMessage
+    #     # if it's present in the original history.
+    #     # The SystemMessage has special instructions for the model.
+    #     include_system=True,
+    #     allow_partial=False,
+    # )
+
+    # make a custom prompt to instruct llm
     custom_prompt = {
     "role": "system",
     "content": "You are a routing assistant. "
@@ -63,6 +92,24 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
     }
     messages_with_prompt = [custom_prompt] + state["messages"]
 
+    # before pass to llm trim messsages to reduce token usage
+    messages_with_prompt = trim_messages(
+                                        messages_with_prompt,
+                                        max_tokens=100,
+                                        strategy="last",
+                                        token_counter=dummy_token_counter,
+                                        # Most chat models expect that chat history starts with either:
+                                        # (1) a HumanMessage or
+                                        # (2) a SystemMessage followed by a HumanMessage
+                                        start_on="human",
+                                        # Usually, we want to keep the SystemMessage
+                                        # if it's present in the original history.
+                                        # The SystemMessage has special instructions for the model.
+                                        include_system=True,
+                                        allow_partial=False,
+                                    )
+
+    # generate response
     response = llm_router_with_tools.invoke(messages_with_prompt)
 
     # if the router think to navigate to agent
@@ -73,21 +120,21 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
             tool_name = tool_call["name"]
             tool_id = tool_call["id"]
 
-            # # if not relavant tool called
-            # if tool_name not in ["cancel_booking_assistant", "new_booking_assistant"]:
-            #     return Command(
-            #             # next node to be executed next
-            #             goto="router_assistant",
-            #             # 
-            #             update={"messages": [ToolMessage(content="not correct tool try to route correct specialized agent by cancel_booking_assistant,new_booking_assistant",tool_call_id=tool_id)]}
-            #     )
+            # if not relavant tool called
+            if tool_name not in ["cancel_booking_assistant", "new_booking_assistant"]:
+                return Command(
+                        # next node to be executed next
+                        goto=END,
+                        # 
+                        update={"messages": [ToolMessage(content="not correct tool try to route correct specialized agent by cancel_booking_assistant,new_booking_assistant",tool_call_id=tool_id),HumanMessage(
+                            content="The last tool call raised an exception. Try calling a correct tool again. Do not repeat mistakes."
+                                ),]}
+                )
 
             # route to relavant node
             return Command(
                 # next node to be executed next
                 goto=tool_name,
-                # state update 
-                update={"messages": "{tool_name} calling",}
             )
     
     # if the tool is not called and the llm provide the output
@@ -101,11 +148,8 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
 # make cancel appointment node
 def cancel_booking_assistant_node(state: State) -> Dict[Any]:
     llm_cancel_booking = _get_llm()
+    llm_cancel_booking = llm_cancel_booking.bind_tools([])
     llm_cancel_booking_with_tools = llm_cancel_booking.bind_tools([cancel_appointment,search_for_appointment])
-
-    # make a runnable with prompt template
-    # cancel_booking_runnable = cancel_appointment_prompt | llm_cancel_booking_with_tools
-
     response = llm_cancel_booking_with_tools.invoke(state["messages"])
     return {"messages": response}
 
@@ -139,5 +183,4 @@ graph_builder.add_edge("new_booking_tools", "new_booking_assistant")
 graph_builder.add_edge("cancel_booking_tools", "cancel_booking_assistant")
 graph_builder.add_edge("new_booking_assistant", END)
 graph_builder.add_edge("cancel_booking_assistant", END)
-
 graph = graph_builder.compile()
