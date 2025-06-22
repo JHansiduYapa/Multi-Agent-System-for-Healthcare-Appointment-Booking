@@ -5,13 +5,13 @@ from langchain_core.messages import ToolMessage
 from typing_extensions import Annotated
 from langgraph.prebuilt import InjectedState
 from langgraph.graph import StateGraph, MessagesState, START, END
-from pydantic import BaseModel, Field
-from typing import Literal
+from pydantic import BaseModel
 from langchain_core.tools import tool
 from typing import Optional, Dict, List
 import sqlite3
 import json
 import os
+from datetime import datetime
 
 # Define your database path
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'database', 'appointments.db')
@@ -87,30 +87,45 @@ def book_appointment(user_id: int, doctor_id: int, date: str, time: str) -> str:
     Returns:
         str: JSON with booking status.
     """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    try:
+        # Parse and validate appointment datetime
+        appointment_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+        now = datetime.now()
 
-    # Check availability
-    cursor.execute("""
-        SELECT 1 FROM Appointment
-        WHERE Doctor_ID = ? AND Appointment_Date = ? AND Appointment_Time = ?
-    """, (doctor_id, date, time))
-    result = cursor.fetchone()
+        if appointment_datetime <= now:
+            return json.dumps({"success": False, "message": "Appointment must be booked for a future time."})
 
-    if result:
+        if not (8 <= appointment_datetime.hour < 22):
+            return json.dumps({"success": False, "message": "Appointment time must be between 08:00 and 22:00."})
+
+        # Connect to DB and check availability
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT 1 FROM Appointment
+            WHERE Doctor_ID = ? AND Appointment_Date = ? AND Appointment_Time = ?
+        """, (doctor_id, date, time))
+        
+        if cursor.fetchone():
+            conn.close()
+            return json.dumps({"success": False, "message": "Doctor is not available at this date and time."})
+
+        # Insert the new appointment
+        cursor.execute("""
+            INSERT INTO Appointment (Appointment_Time, Appointment_Date, Doctor_ID, Patient_ID)
+            VALUES (?, ?, ?, ?)
+        """, (time, date, doctor_id, user_id))
+
+        conn.commit()
         conn.close()
-        return json.dumps({"success": False, "message": "Doctor is not available at this date and time."})
 
-    # Insert new appointment
-    cursor.execute("""
-        INSERT INTO Appointment (Appointment_Time, Appointment_Date, Doctor_ID, Patient_ID)
-        VALUES (?, ?, ?, ?)
-    """, (time, date, doctor_id, user_id))
+        return json.dumps({"success": True, "message": "Appointment booked successfully."})
 
-    conn.commit()
-    conn.close()
-
-    return json.dumps({"success": True, "message": "Appointment booked successfully."})
+    except ValueError:
+        return json.dumps({"success": False, "message": "Invalid date or time format. Use YYYY-MM-DD and HH:MM."})
+    except Exception as e:
+        return json.dumps({"success": False, "message": f"An error occurred: {str(e)}"})
 
 # Tool 4: Search for an appointment by ID
 @tool
@@ -236,3 +251,6 @@ class new_booking_assistant(BaseModel):
 
 class cancel_booking_assistant(BaseModel):
     """based on conversation history,If user needs to cancel an appointment"""
+
+class general_hospital_assistant(BaseModel):
+    """based on conversation history,If user needs information about hospital"""

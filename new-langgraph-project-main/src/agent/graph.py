@@ -15,21 +15,20 @@ from typing import Annotated, Literal, Optional
 from typing_extensions import TypedDict
 from langgraph.graph.message import AnyMessage, add_messages
 from agent.utils.llm import _get_llm,dummy_token_counter
-from agent.utils.tools import book_appointment,cancel_appointment,search_for_appointment,check_doctor_availability,search_for_doctor,new_booking_assistant,cancel_booking_assistant
+from agent.utils.vectorstore import load_document,split_text,create_vectorstore,get_retriever_tool
+from agent.utils.tools import book_appointment,cancel_appointment,search_for_appointment,check_doctor_availability,search_for_doctor,new_booking_assistant,cancel_booking_assistant,general_hospital_assistant
 from langgraph.prebuilt import tools_condition
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 from langchain_core.messages import ToolMessage
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-    trim_messages,
-)
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, trim_messages
 from langchain_core.messages.utils import count_tokens_approximately
+import os
+from dotenv import load_dotenv
+from elevenlabs.client import ElevenLabs
+from elevenlabs import play
 
 # state of the graph
 class State(AgentState):
@@ -42,16 +41,16 @@ def new_booking_assistant_node(state: State, config: RunnableConfig) -> Dict[Any
     """
     llm_new_booking = _get_llm()
     llm_new_booking = llm_new_booking.bind_tools([])
-    llm_new_booking_with_tools = llm_new_booking.bind_tools([book_appointment,search_for_doctor,check_doctor_availability])
+    llm_new_booking_with_tools = llm_new_booking.bind_tools([book_appointment,search_for_doctor,check_doctor_availability,])
     response = llm_new_booking_with_tools.invoke(state["messages"])
     return {"messages": response}
 
-def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "new_booking_assistant",END]]:
+def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "new_booking_assistant","general_hospital_assistant",END]]:
     """Route to correct worker agent, You only routing the conversation.
     """
     llm_router = _get_llm()
     llm_router = llm_router.bind_tools([])
-    llm_router_with_tools = llm_router.bind_tools([cancel_booking_assistant,new_booking_assistant])
+    llm_router_with_tools = llm_router.bind_tools([cancel_booking_assistant,new_booking_assistant,general_hospital_assistant])
 
     # trim the messages 
     # trim_messages(
@@ -88,6 +87,7 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
     "content": "You are a routing assistant. "
                 "Based on the message history, decide whether the conversation should be handed over to a specialized agent. "
                 "Use the appropriate tool to route the request."
+                "If Don't need tool reply that without tool calling."
                 "you can not use other tools on booking and cancelling."
     }
     messages_with_prompt = [custom_prompt] + state["messages"]
@@ -108,7 +108,7 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
                                         include_system=True,
                                         allow_partial=False,
                                     )
-
+    
     # generate response
     response = llm_router_with_tools.invoke(messages_with_prompt)
 
@@ -121,7 +121,7 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
             tool_id = tool_call["id"]
 
             # if not relavant tool called
-            if tool_name not in ["cancel_booking_assistant", "new_booking_assistant"]:
+            if tool_name not in ["cancel_booking_assistant", "new_booking_assistant","general_hospital_assistant"]:
                 return Command(
                         # next node to be executed next
                         goto=END,
@@ -153,14 +153,73 @@ def cancel_booking_assistant_node(state: State) -> Dict[Any]:
     response = llm_cancel_booking_with_tools.invoke(state["messages"])
     return {"messages": response}
 
+def rag_node(state: State) -> Dict[Any]:
+    # create vector store
+    file_path = "C:/Users/janit/OneDrive/Desktop/AI-Agent-for-Healthcare-Appointment-Booking/new-langgraph-project-main/src/agent/Scope-of-Services-Statement-of-Purpose.pdf"
+    pages = load_document(file_path)
+    documents = split_text(pages)
+    vectorstore = create_vectorstore(documents)
+    
+    # make the tool
+    tool = get_retriever_tool(vectorstore)
+
+    # then retrieve the context based on the question 
+    question = state["messages"][-1].content
+    # generate answer
+    context = tool.invoke({"query": question}) 
+
+    # generate answer
+    GENERATE_PROMPT = (
+    "You are an assistant for question-answering tasks. "
+    "Use the following pieces of retrieved context to answer the question. "
+    "If you don't know the answer, just say that you don't know. "
+    "Use three sentences maximum and keep the answer concise.\n"
+    "Question: {question} \n"
+    "Context: {context}"
+    )
+
+    context = tool.invoke({"query": question})
+
+    # create the prompt
+    prompt = GENERATE_PROMPT.format(question=question, context=context)
+
+    # generate answer
+    general_hospital_llm = _get_llm()
+    response = general_hospital_llm.invoke([{"role": "user", "content": prompt}])
+
+    return {'messages': response}
+
+elevenlabs = ElevenLabs(
+  api_key=os.getenv("ELEVENLABS_API_KEY"),
+)
+
+def convert_to_voice(state: State):
+    # get the last ai message
+    last_message = state["messages"][-1]
+    # check if it is an ai message
+
+
+    audio = elevenlabs.text_to_speech.convert(
+    text=last_message.content,
+    voice_id="Xb7hH8MSUJpSbSDYk0k2",
+    model_id="eleven_multilingual_v2",
+    output_format="mp3_44100_128",
+    )
+
+    play(audio)
+
+    return
+
 
 # Define the graph
 graph_builder = StateGraph(State)
 graph_builder.add_node("router_assistant", router_model)
 graph_builder.add_node("new_booking_assistant", new_booking_assistant_node)
 graph_builder.add_node("cancel_booking_assistant", cancel_booking_assistant_node)
+graph_builder.add_node("general_hospital_assistant", rag_node)
 graph_builder.add_node("new_booking_tools", ToolNode([book_appointment, search_for_doctor,check_doctor_availability]))
 graph_builder.add_node("cancel_booking_tools", ToolNode([cancel_appointment, search_for_appointment]))
+graph_builder.add_node("audio_output", convert_to_voice)
 
 graph_builder.set_entry_point("router_assistant")
 
@@ -183,4 +242,5 @@ graph_builder.add_edge("new_booking_tools", "new_booking_assistant")
 graph_builder.add_edge("cancel_booking_tools", "cancel_booking_assistant")
 graph_builder.add_edge("new_booking_assistant", END)
 graph_builder.add_edge("cancel_booking_assistant", END)
+graph_builder.add_edge("general_hospital_assistant", END)
 graph = graph_builder.compile()
