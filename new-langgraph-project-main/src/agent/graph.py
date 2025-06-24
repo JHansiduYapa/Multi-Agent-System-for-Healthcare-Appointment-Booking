@@ -45,7 +45,7 @@ def new_booking_assistant_node(state: State, config: RunnableConfig) -> Dict[Any
     response = llm_new_booking_with_tools.invoke(state["messages"])
     return {"messages": response}
 
-def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "new_booking_assistant","general_hospital_assistant",END]]:
+def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "new_booking_assistant","general_hospital_assistant", "audio_output", END]]:
     """Route to correct worker agent, You only routing the conversation.
     """
     llm_router = _get_llm()
@@ -140,7 +140,7 @@ def router_model(state: State)  -> Command[Literal["cancel_booking_assistant", "
     # if the tool is not called and the llm provide the output
     return Command(
                 # next node to be executed next
-                goto=END,
+                goto="audio_output",
                 # state update 
                 update={"messages": response,}
             )
@@ -189,11 +189,12 @@ def rag_node(state: State) -> Dict[Any]:
 
     return {'messages': response}
 
-elevenlabs = ElevenLabs(
-  api_key=os.getenv("ELEVENLABS_API_KEY"),
-)
+
 
 def convert_to_voice(state: State):
+    elevenlabs = ElevenLabs(
+    api_key=os.getenv("ELEVENLABS_API_KEY"),
+    )
     # get the last ai message
     last_message = state["messages"][-1]
     # check if it is an ai message
@@ -227,20 +228,21 @@ graph_builder.set_entry_point("router_assistant")
 graph_builder.add_conditional_edges(
     "new_booking_assistant",
     tools_condition,
-    {"tools": "new_booking_tools", "__end__": END}
+    {"tools": "new_booking_tools", "__end__": "audio_output"}
 )
 
 # Conditional edge: if tool call, go to "tools", else END
 graph_builder.add_conditional_edges(
     "cancel_booking_assistant",
     tools_condition,
-    {"tools": "cancel_booking_tools", "__end__": END}
+    {"tools": "cancel_booking_tools", "__end__": "audio_output"}
 )
 
 # After tools, return to LLM node
 graph_builder.add_edge("new_booking_tools", "new_booking_assistant")
 graph_builder.add_edge("cancel_booking_tools", "cancel_booking_assistant")
-graph_builder.add_edge("new_booking_assistant", END)
-graph_builder.add_edge("cancel_booking_assistant", END)
-graph_builder.add_edge("general_hospital_assistant", END)
+graph_builder.add_edge("new_booking_assistant", "audio_output")
+graph_builder.add_edge("cancel_booking_assistant", "audio_output")
+graph_builder.add_edge("general_hospital_assistant", "audio_output")
+graph_builder.add_edge("audio_output", END)
 graph = graph_builder.compile()
