@@ -10,6 +10,14 @@ A modular, extensible framework for managing healthcare appointment workflows us
 
 ---
 
+## State Transitions
+
+This GIF illustrates how the router inspects message history and transitions between nodes:
+
+![State Transitions](https://github.com/JHansiduYapa/Multi-Agent-System-for-Healthcare-Appointment-Booking/blob/main/src/short_video.gif)
+
+---
+
 ## Features
 
 1. **Custom Router**
@@ -153,14 +161,6 @@ def rag_node(state: State) -> Dict[Any]:
 ## Architecture Diagram
 
 ![Architecture Diagram](https://github.com/JHansiduYapa/Multi-Agent-System-for-Healthcare-Appointment-Booking/blob/main/src/graph.png)
-
----
-
-## State Transitions
-
-This GIF illustrates how the router inspects message history and transitions between nodes:
-
-![State Transitions](https://github.com/JHansiduYapa/Multi-Agent-System-for-Healthcare-Appointment-Booking/blob/main/src/short_video.gif)
 
 ---
 
